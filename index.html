@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kitchen Keeper</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary">
+        <div class="brand">
+          <span class="brand-mark">K</span>
+          <div>
+            <h1>Kitchen Keeper</h1>
+            <p>Recipes, pantry, and grocery gaps</p>
+          </div>
+        </div>
+        <nav class="nav-tabs" aria-label="Sections">
+          <button class="nav-tab active" data-view="recipes" type="button">Recipes</button>
+          <button class="nav-tab" data-view="pantry" type="button">Pantry</button>
+          <button class="nav-tab" data-view="grocery" type="button">Grocery List</button>
+        </nav>
+        <div class="quick-stats">
+          <div>
+            <strong id="recipeCount">0</strong>
+            <span>recipes</span>
+          </div>
+          <div>
+            <strong id="pantryCount">0</strong>
+            <span>pantry items</span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <section class="view active" id="recipesView">
+          <header class="view-header">
+            <div>
+              <p class="eyebrow">Recipe Library</p>
+              <h2>Pick dinner, see what is missing.</h2>
+            </div>
+            <button class="primary-button" id="openRecipeForm" type="button">Add Recipe</button>
+          </header>
+
+          <div class="toolbar">
+            <label class="search-field">
+              <span>Search recipes</span>
+              <input id="recipeSearch" type="search" placeholder="Chicken soup, pasta, tacos..." />
+            </label>
+            <label class="select-field">
+              <span>Filter</span>
+              <select id="recipeFilter">
+                <option value="all">All recipes</option>
+                <option value="ready">Have everything</option>
+                <option value="missing">Missing items</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="content-grid">
+            <div class="list-panel">
+              <div class="panel-title">
+                <h3>Saved Recipes</h3>
+                <span id="recipeListMeta">No recipes yet</span>
+              </div>
+              <div class="card-list" id="recipeList"></div>
+            </div>
+
+            <div class="detail-panel" id="recipeDetail">
+              <div class="empty-state">
+                <h3>No recipe selected</h3>
+                <p>Add a recipe or choose one from the list to compare it with your pantry.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" id="pantryView">
+          <header class="view-header">
+            <div>
+              <p class="eyebrow">Pantry</p>
+              <h2>Track what you have on hand.</h2>
+            </div>
+            <button class="primary-button" id="openPantryForm" type="button">Add Items</button>
+          </header>
+
+          <div class="toolbar">
+            <label class="search-field">
+              <span>Search pantry</span>
+              <input id="pantrySearch" type="search" placeholder="Flour, eggs, tomatoes..." />
+            </label>
+            <label class="select-field">
+              <span>Sort</span>
+              <select id="pantrySort">
+                <option value="name">Name</option>
+                <option value="category">Category</option>
+                <option value="recent">Recently added</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="pantry-layout">
+            <div class="pantry-list" id="pantryList"></div>
+            <aside class="receipt-box">
+              <h3>Receipt Capture</h3>
+              <p>Add a receipt photo and the app will try to read the items automatically.</p>
+              <label class="image-drop">
+                <input id="receiptImage" type="file" accept="image/*" capture="environment" />
+                <span>Take or upload receipt photo</span>
+              </label>
+              <img id="receiptPreview" class="preview-image hidden" alt="Receipt preview" />
+              <button class="secondary-button" id="readReceiptImage" type="button">Read Receipt Photo</button>
+              <p class="scan-status" id="receiptScanStatus"></p>
+              <textarea id="receiptText" rows="8" placeholder="Milk&#10;Eggs&#10;Bread&#10;2 cans black beans"></textarea>
+              <button class="secondary-button" id="addReceiptItems" type="button">Add Receipt Items</button>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" id="groceryView">
+          <header class="view-header">
+            <div>
+              <p class="eyebrow">Grocery List</p>
+              <h2>Missing ingredients collected in one place.</h2>
+            </div>
+            <button class="primary-button" id="copyGroceryList" type="button">Copy List</button>
+          </header>
+
+          <div class="grocery-layout">
+            <div>
+              <label class="select-field wide">
+                <span>Build from recipe</span>
+                <select id="groceryRecipeSelect"></select>
+              </label>
+              <div class="grocery-list" id="groceryList"></div>
+            </div>
+            <aside class="note-panel">
+              <h3>How matching works</h3>
+              <p>Ingredients are matched by the main food name, so "2 cups chopped carrots" will look for carrots in your pantry. You can still add or remove items manually after the list is created.</p>
+              <div class="manual-row">
+                <input id="manualGroceryItem" type="text" placeholder="Add one more item..." />
+                <button class="secondary-button" id="addManualGroceryItem" type="button">Add</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="recipeDialog">
+      <form method="dialog" class="modal-form" id="recipeForm">
+        <header>
+          <div>
+            <p class="eyebrow">New Recipe</p>
+            <h2>Add by typing, photo, or link.</h2>
+          </div>
+          <button class="icon-button" id="closeRecipeDialog" type="button" aria-label="Close">x</button>
+        </header>
+        <div class="form-grid">
+          <label>
+            <span>Recipe name</span>
+            <input id="recipeName" type="text" required placeholder="Grandma's chicken casserole" />
+          </label>
+          <label>
+            <span>Source link</span>
+            <input id="recipeUrl" type="url" placeholder="https://example.com/recipe" />
+          </label>
+        </div>
+        <button class="secondary-button" id="importRecipeLink" type="button">Import From Link</button>
+        <label>
+          <span>Cookbook photo</span>
+          <input id="recipeImage" type="file" accept="image/*" capture="environment" />
+        </label>
+        <img id="recipePreview" class="preview-image hidden" alt="Recipe page preview" />
+        <button class="secondary-button" id="readRecipeImage" type="button">Read Recipe Photo</button>
+        <p class="scan-status" id="recipeScanStatus"></p>
+        <label>
+          <span>Ingredients, one per line</span>
+          <textarea id="recipeIngredients" rows="8" required placeholder="2 cups rice&#10;1 lb chicken breast&#10;1 can cream of mushroom soup"></textarea>
+        </label>
+        <label>
+          <span>Directions</span>
+          <textarea id="recipeDirections" rows="6" placeholder="Mix ingredients. Bake at 350 for 30 minutes."></textarea>
+        </label>
+        <footer>
+          <button class="secondary-button" id="cancelRecipeDialog" type="button">Cancel</button>
+          <button class="primary-button" id="saveRecipe" value="default" type="submit">Save Recipe</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="pantryDialog">
+      <form method="dialog" class="modal-form" id="pantryForm">
+        <header>
+          <div>
+            <p class="eyebrow">Pantry Entry</p>
+            <h2>Add one item or a whole receipt.</h2>
+          </div>
+          <button class="icon-button" id="closePantryDialog" type="button" aria-label="Close">x</button>
+        </header>
+        <label>
+          <span>Items, one per line</span>
+          <textarea id="pantryBulkItems" rows="8" required placeholder="1 gallon milk&#10;12 eggs&#10;2 cans diced tomatoes"></textarea>
+        </label>
+        <footer>
+          <button class="secondary-button" id="cancelPantryDialog" type="button">Cancel</button>
+          <button class="primary-button" id="savePantryItems" value="default" type="submit">Add Items</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
