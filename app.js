@@ -475,16 +475,92 @@ async function readImageText(input, statusElement) {
     return "";
   }
 
+  setStatus(statusElement, "Preparing photo...");
+  const preparedImage = await prepareImageForOcr(file);
   setStatus(statusElement, "Reading photo...");
-  const result = await window.Tesseract.recognize(file, "eng", {
+  const result = await window.Tesseract.recognize(preparedImage, "eng", {
     logger: (event) => {
       if (event.status === "recognizing text") {
         setStatus(statusElement, `Reading photo... ${Math.round(event.progress * 100)}%`);
       }
-    }
+    },
+    tessedit_pageseg_mode: window.Tesseract.PSM?.AUTO || "3",
+    tessedit_ocr_engine_mode: window.Tesseract.OEM?.LSTM_ONLY || "1",
+    preserve_interword_spaces: "1"
   });
   setStatus(statusElement, "Photo read. Review the extracted text before saving.");
-  return result.data.text.trim();
+  return normalizeOcrText(result.data.text);
+}
+
+async function prepareImageForOcr(file) {
+  const imageUrl = await fileToDataUrl(file);
+  const image = await loadImage(imageUrl);
+  const scale = image.width < 1600 ? 2 : 1.35;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+  const threshold = averageLuminance(data) * 0.92;
+
+  for (let index = 0; index < data.length; index += 4) {
+    const red = data[index];
+    const green = data[index + 1];
+    const blue = data[index + 2];
+    const luminance = red * 0.299 + green * 0.587 + blue * 0.114;
+    const contrasted = luminance < threshold ? 0 : 255;
+    data[index] = contrasted;
+    data[index + 1] = contrasted;
+    data[index + 2] = contrasted;
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function averageLuminance(data) {
+  let total = 0;
+  let pixels = 0;
+  for (let index = 0; index < data.length; index += 4) {
+    total += data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+    pixels += 1;
+  }
+  return total / pixels;
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Could not read the selected file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not load the selected image."));
+    image.src = src;
+  });
+}
+
+function normalizeOcrText(text) {
+  return text
+    .replace(/\r/g, "")
+    .replace(/[|]/g, "I")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 async function importRecipeFromLink() {
@@ -614,7 +690,7 @@ function instructionText(value) {
 }
 
 function extractRecipeFromText(text) {
-  const lines = linesFromText(text);
+  const lines = cleanupRecipeLines(linesFromText(text));
   const name = lines.find((line) => !isRecipeHeading(line) && line.length > 3) || "Imported Recipe";
   const ingredients = extractSection(lines, INGREDIENT_HEADINGS, DIRECTION_HEADINGS).filter(isLikelyIngredient);
   const directions = extractSection(lines, DIRECTION_HEADINGS, INGREDIENT_HEADINGS).join("\n");
@@ -626,6 +702,15 @@ function extractRecipeFromText(text) {
     ingredients: ingredients.length ? ingredients : lines.filter(isLikelyIngredient).slice(0, 20),
     directions
   };
+}
+
+function cleanupRecipeLines(lines) {
+  return lines
+    .map((line) => line.replace(/\s{2,}/g, " ").trim())
+    .filter(Boolean)
+    .filter((line) => !/^(save|print|share|advertisement|jump to recipe)$/i.test(line))
+    .filter((line) => !/^https?:/i.test(line))
+    .filter((line) => !/^\d+\s*(ratings?|reviews?)$/i.test(line));
 }
 
 function extractSection(lines, startHeadings, stopHeadings) {
@@ -661,7 +746,7 @@ function isLikelyIngredient(line) {
 }
 
 function extractReceiptItems(text) {
-  return linesFromText(text).filter((line) => {
+  return cleanupReceiptLines(linesFromText(text)).filter((line) => {
     const lower = line.toLowerCase();
     if (line.length < 3 || line.length > 60) return false;
     if (/\b(total|subtotal|tax|visa|mastercard|debit|credit|cash|change|balance|auth|approval|receipt|store|phone|thank|coupon|savings)\b/.test(lower)) return false;
@@ -669,6 +754,16 @@ function extractReceiptItems(text) {
     if (/^\$?\d+([.,]\d{2})?$/.test(line)) return false;
     return /[a-z]/i.test(line);
   });
+}
+
+function cleanupReceiptLines(lines) {
+  return lines
+    .map((line) => line.replace(/\s{2,}/g, " ").trim())
+    .map((line) => line.replace(/\s+\$?\d+[.,]\d{2}\s*$/, "").trim())
+    .filter(Boolean)
+    .filter((line) => !/^[-_=]+$/.test(line))
+    .filter((line) => !/^\*+$/.test(line))
+    .filter((line) => !/^\d+$/.test(line));
 }
 
 function wireEvents() {
