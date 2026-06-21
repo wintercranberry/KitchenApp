@@ -463,7 +463,7 @@ function setStatus(element, message) {
   element.textContent = message;
 }
 
-async function readImageText(input, statusElement) {
+async function readImageText(input, statusElement, mode) {
   const file = input.files?.[0];
   if (!file) {
     showToast("Choose a photo first.");
@@ -476,62 +476,123 @@ async function readImageText(input, statusElement) {
   }
 
   setStatus(statusElement, "Preparing photo...");
-  const preparedImage = await prepareImageForOcr(file);
+  const preparedImage = await prepareImageForOcr(file, mode);
   setStatus(statusElement, "Reading photo...");
+
+  const psm = mode === "receipt"
+    ? (window.Tesseract.PSM?.SINGLE_BLOCK || "6")
+    : (window.Tesseract.PSM?.AUTO || "3");
+
   const result = await window.Tesseract.recognize(preparedImage, "eng", {
     logger: (event) => {
       if (event.status === "recognizing text") {
         setStatus(statusElement, `Reading photo... ${Math.round(event.progress * 100)}%`);
       }
     },
-    tessedit_pageseg_mode: window.Tesseract.PSM?.AUTO || "3",
+    tessedit_pageseg_mode: psm,
     tessedit_ocr_engine_mode: window.Tesseract.OEM?.LSTM_ONLY || "1",
     preserve_interword_spaces: "1"
   });
+
+  const lines = (result.data.lines || [])
+    .filter((line) => line.confidence > 40)
+    .map((line) => line.text);
+  const filtered = lines.length > 0 ? lines.join("\n") : result.data.text;
+
   setStatus(statusElement, "Photo read. Review the extracted text before saving.");
-  return normalizeOcrText(result.data.text);
+  return normalizeOcrText(filtered);
 }
 
-async function prepareImageForOcr(file) {
+async function prepareImageForOcr(file, mode) {
   const imageUrl = await fileToDataUrl(file);
   const image = await loadImage(imageUrl);
-  const scale = image.width < 1600 ? 2 : 1.35;
+  const targetWidth = 2000;
+  const scale = Math.max(1, targetWidth / image.width);
   const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(image.width * scale));
-  canvas.height = Math.max(1, Math.round(image.height * scale));
-  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const w = Math.max(1, Math.round(image.width * scale));
+  const h = Math.max(1, Math.round(image.height * scale));
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(image, 0, 0, w, h);
 
-  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imageData.data;
-  const threshold = averageLuminance(data) * 0.92;
-
-  for (let index = 0; index < data.length; index += 4) {
-    const red = data[index];
-    const green = data[index + 1];
-    const blue = data[index + 2];
-    const luminance = red * 0.299 + green * 0.587 + blue * 0.114;
-    const contrasted = luminance < threshold ? 0 : 255;
-    data[index] = contrasted;
-    data[index + 1] = contrasted;
-    data[index + 2] = contrasted;
-  }
-
-  context.putImageData(imageData, 0, 0);
+  const imageData = ctx.getImageData(0, 0, w, h);
+  toGrayscale(imageData.data);
+  applyBlur3x3(imageData, w, h);
+  const blockSize = mode === "receipt" ? 25 : 35;
+  const bias = mode === "receipt" ? 12 : 8;
+  applyAdaptiveThreshold(imageData, w, h, blockSize, bias);
+  ctx.putImageData(imageData, 0, 0);
   return canvas;
 }
 
-function averageLuminance(data) {
-  let total = 0;
-  let pixels = 0;
-  for (let index = 0; index < data.length; index += 4) {
-    total += data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
-    pixels += 1;
+function toGrayscale(data) {
+  for (let i = 0; i < data.length; i += 4) {
+    const g = Math.round(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+    data[i] = g;
+    data[i + 1] = g;
+    data[i + 2] = g;
   }
-  return total / pixels;
+}
+
+function applyBlur3x3(imageData, w, h) {
+  const src = new Uint8ClampedArray(imageData.data);
+  const dst = imageData.data;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      let sum = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const weight = (dx === 0 && dy === 0) ? 4 : (dx === 0 || dy === 0) ? 2 : 1;
+          sum += src[((y + dy) * w + (x + dx)) * 4] * weight;
+        }
+      }
+      const val = Math.round(sum / 16);
+      const idx = (y * w + x) * 4;
+      dst[idx] = val;
+      dst[idx + 1] = val;
+      dst[idx + 2] = val;
+    }
+  }
+}
+
+function applyAdaptiveThreshold(imageData, w, h, blockSize, bias) {
+  const data = imageData.data;
+  const gray = new Uint32Array(w * h);
+  for (let i = 0; i < gray.length; i++) gray[i] = data[i * 4];
+
+  const integral = new Float64Array((w + 1) * (h + 1));
+  for (let y = 1; y <= h; y++) {
+    let rowSum = 0;
+    for (let x = 1; x <= w; x++) {
+      rowSum += gray[(y - 1) * w + (x - 1)];
+      integral[y * (w + 1) + x] = rowSum + integral[(y - 1) * (w + 1) + x];
+    }
+  }
+
+  const half = Math.floor(blockSize / 2);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const y1 = Math.max(0, y - half);
+      const x1 = Math.max(0, x - half);
+      const y2 = Math.min(h - 1, y + half);
+      const x2 = Math.min(w - 1, x + half);
+      const count = (y2 - y1 + 1) * (x2 - x1 + 1);
+      const sum = integral[(y2 + 1) * (w + 1) + (x2 + 1)]
+        - integral[y1 * (w + 1) + (x2 + 1)]
+        - integral[(y2 + 1) * (w + 1) + x1]
+        + integral[y1 * (w + 1) + x1];
+      const mean = sum / count;
+      const val = gray[y * w + x] > mean - bias ? 255 : 0;
+      const idx = (y * w + x) * 4;
+      data[idx] = val;
+      data[idx + 1] = val;
+      data[idx + 2] = val;
+    }
+  }
 }
 
 function fileToDataUrl(file) {
@@ -556,11 +617,32 @@ function normalizeOcrText(text) {
   return text
     .replace(/\r/g, "")
     .replace(/[|]/g, "I")
-    .replace(/[\u201c\u201d]/g, '"')
-    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d\u00ab\u00bb]/g, '"')
+    .replace(/[\u2018\u2019\u2032`]/g, "'")
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\u00bd/g, "1/2")
+    .replace(/\u00bc/g, "1/4")
+    .replace(/\u00be/g, "3/4")
+    .replace(/\u2153/g, "1/3")
+    .replace(/\u2154/g, "2/3")
     .replace(/[^\S\n]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
+    .split("\n")
+    .map((line) => correctOcrLine(line.trim()))
+    .join("\n")
     .trim();
+}
+
+function correctOcrLine(line) {
+  return line
+    .replace(/\b0(?=[a-z])/gi, "O")
+    .replace(/(?<=[a-zA-Z])0\b/g, "o")
+    .replace(/\bl\b(?=\s*(?:cup|tbsp|tsp|lb|oz|can|jar|clove|pkg))/gi, "1")
+    .replace(/\bfl0ur\b/gi, "flour")
+    .replace(/\bsuqar\b/gi, "sugar")
+    .replace(/\bcorn\s?starch\b/gi, "cornstarch")
+    .replace(/\b(\d+)\s*[oO]\s*[zZ]\b/g, "$1 oz")
+    .replace(/\b(\d+)\s*[iI1]\s*[bB]\b/g, "$1 lb");
 }
 
 async function importRecipeFromLink() {
@@ -691,17 +773,50 @@ function instructionText(value) {
 
 function extractRecipeFromText(text) {
   const lines = cleanupRecipeLines(linesFromText(text));
-  const name = lines.find((line) => !isRecipeHeading(line) && line.length > 3) || "Imported Recipe";
-  const ingredients = extractSection(lines, INGREDIENT_HEADINGS, DIRECTION_HEADINGS).filter(isLikelyIngredient);
-  const directions = extractSection(lines, DIRECTION_HEADINGS, INGREDIENT_HEADINGS).join("\n");
+  const name = findRecipeName(lines);
+  let ingredients = extractSection(lines, INGREDIENT_HEADINGS, DIRECTION_HEADINGS).filter(isLikelyIngredient);
+  let directions = extractSection(lines, DIRECTION_HEADINGS, INGREDIENT_HEADINGS).join("\n");
 
-  return {
-    name,
-    url: "",
-    image: "",
-    ingredients: ingredients.length ? ingredients : lines.filter(isLikelyIngredient).slice(0, 20),
-    directions
-  };
+  if (!ingredients.length) {
+    const scored = lines
+      .map((line) => ({ line, score: ingredientScore(line) }))
+      .filter((item) => item.score >= 2);
+    scored.sort((a, b) => b.score - a.score);
+    ingredients = scored.slice(0, 25).map((item) => item.line);
+  }
+
+  if (!directions) {
+    const dirStart = lines.findIndex((line) => /^\s*(step\s*\d|^\d+[.)]\s*[A-Z])/i.test(line));
+    if (dirStart !== -1) {
+      directions = lines.slice(dirStart).filter((line) => !isLikelyIngredient(line)).join("\n");
+    }
+  }
+
+  return { name, url: "", image: "", ingredients, directions };
+}
+
+function findRecipeName(lines) {
+  for (const line of lines) {
+    if (isRecipeHeading(line)) continue;
+    if (line.length < 3 || line.length > 80) continue;
+    if (isLikelyIngredient(line)) continue;
+    if (/^\d+[.)]\s/.test(line)) continue;
+    return line;
+  }
+  return "Imported Recipe";
+}
+
+function ingredientScore(line) {
+  let score = 0;
+  const lower = line.toLowerCase();
+  if (line.length < 3 || line.length > 100) return 0;
+  if (/^\d/.test(line)) score += 2;
+  if (/\b(cups?|tbsp|tablespoons?|tsp|teaspoons?|lbs?|pounds?|oz|ounces?|grams?|g|kg|ml|liters?|cans?|jars?|cloves?|slices?|packages?|bags?|boxes?|gallons?|quarts?|pints?|pinch|dash|handful)\b/i.test(line)) score += 3;
+  if (/\b(salt|pepper|oil|flour|sugar|egg|milk|cheese|butter|garlic|onion|chicken|beef|rice|pasta|cream|tomato|lemon|vanilla|cinnamon|baking)\b/i.test(lower)) score += 2;
+  if (/\b\d+\s*\/\s*\d+\b/.test(line)) score += 2;
+  if (/\b(total|subtotal|tax|step|preheat|bake|cook|stir|mix|combine|serve|minutes|degrees)\b/i.test(lower)) score -= 3;
+  if (line.length > 80) score -= 1;
+  return score;
 }
 
 function cleanupRecipeLines(lines) {
@@ -739,31 +854,56 @@ function isRecipeHeading(line) {
 }
 
 function isLikelyIngredient(line) {
-  const lower = line.toLowerCase();
-  if (line.length < 3 || line.length > 90) return false;
-  if (/subtotal|total|visa|mastercard|cash|change|tax|coupon|thank you|www\.|http/.test(lower)) return false;
-  return /(\d|cup|tbsp|tsp|ounce|oz|pound|lb|can|jar|clove|salt|pepper|oil|flour|sugar|egg|milk|cheese|butter)/i.test(line);
+  return ingredientScore(line) >= 2;
 }
 
 function extractReceiptItems(text) {
-  return cleanupReceiptLines(linesFromText(text)).filter((line) => {
-    const lower = line.toLowerCase();
-    if (line.length < 3 || line.length > 60) return false;
-    if (/\b(total|subtotal|tax|visa|mastercard|debit|credit|cash|change|balance|auth|approval|receipt|store|phone|thank|coupon|savings)\b/.test(lower)) return false;
-    if (/^\d{2,}[-\s]?\d{2,}/.test(line)) return false;
-    if (/^\$?\d+([.,]\d{2})?$/.test(line)) return false;
-    return /[a-z]/i.test(line);
-  });
+  const lines = cleanupReceiptLines(linesFromText(text));
+  return lines
+    .filter((line) => {
+      const lower = line.toLowerCase();
+      if (line.length < 2 || line.length > 60) return false;
+      if (/\b(total|subtotal|tax|visa|mastercard|debit|credit|cash|change|balance|auth|approval|receipt|store|phone|thank|coupon|savings|reward|member|welcome|return|refund|tender|account)\b/.test(lower)) return false;
+      if (/^\d{2,}[-\s]?\d{2,}/.test(line)) return false;
+      if (/^\$?\d+([.,]\d{2})?$/.test(line)) return false;
+      if (/^[#*=_\-\s]+$/.test(line)) return false;
+      if (/^\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}/.test(line)) return false;
+      if (/\b\d{2}:\d{2}\b/.test(line)) return false;
+      return /[a-z]/i.test(line);
+    })
+    .map(expandReceiptAbbreviation);
+}
+
+function expandReceiptAbbreviation(line) {
+  const ABBREVS = [
+    [/\bGRN\b/gi, "Green"], [/\bORG\b/gi, "Organic"], [/\bWHL\b/gi, "Whole"],
+    [/\bCHKN\b/gi, "Chicken"], [/\bBNLS\b/gi, "Boneless"], [/\bSKNLS\b/gi, "Skinless"],
+    [/\bFRZ\b/gi, "Frozen"], [/\bFRSH\b/gi, "Fresh"], [/\bSWT\b/gi, "Sweet"],
+    [/\bPEPP?\b/gi, "Pepper"], [/\bPOT\b/gi, "Potato"], [/\bTOM\b/gi, "Tomato"],
+    [/\bBAN\b/gi, "Banana"], [/\bSTRW?\b/gi, "Strawberry"], [/\bBLU\b/gi, "Blue"],
+    [/\bCRM\b/gi, "Cream"], [/\bBTR\b/gi, "Butter"], [/\bMLK\b/gi, "Milk"],
+    [/\bYOG\b/gi, "Yogurt"], [/\bCHS\b/gi, "Cheese"], [/\bBRD\b/gi, "Bread"],
+    [/\bVEG\b/gi, "Vegetable"], [/\bFRT\b/gi, "Fruit"], [/\bRED\b/gi, "Red"],
+    [/\bLG\b/gi, "Large"], [/\bSM\b/gi, "Small"], [/\bMED\b/gi, "Medium"],
+    [/\bPKG\b/gi, "Package"], [/\bCNTR?\b/gi, "Container"], [/\bBTL\b/gi, "Bottle"],
+  ];
+  let result = line;
+  for (const [pattern, replacement] of ABBREVS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
 }
 
 function cleanupReceiptLines(lines) {
   return lines
     .map((line) => line.replace(/\s{2,}/g, " ").trim())
     .map((line) => line.replace(/\s+\$?\d+[.,]\d{2}\s*$/, "").trim())
+    .map((line) => line.replace(/^\d{3,}\s+/, "").trim())
+    .map((line) => line.replace(/\s+[A-Z]$/, "").trim())
     .filter(Boolean)
-    .filter((line) => !/^[-_=]+$/.test(line))
-    .filter((line) => !/^\*+$/.test(line))
-    .filter((line) => !/^\d+$/.test(line));
+    .filter((line) => !/^[-_=*#.]+$/.test(line))
+    .filter((line) => !/^\d+$/.test(line))
+    .filter((line) => !/^[A-Z]{1,2}$/i.test(line));
 }
 
 function wireEvents() {
@@ -779,7 +919,7 @@ function wireEvents() {
     const button = document.getElementById("readRecipeImage");
     button.disabled = true;
     try {
-      const text = await readImageText(els.recipeImage, els.recipeScanStatus);
+      const text = await readImageText(els.recipeImage, els.recipeScanStatus, "recipe");
       if (!text) return;
       fillRecipeForm(extractRecipeFromText(text));
     } catch {
@@ -793,7 +933,7 @@ function wireEvents() {
     const button = document.getElementById("readReceiptImage");
     button.disabled = true;
     try {
-      const text = await readImageText(els.receiptImage, els.receiptScanStatus);
+      const text = await readImageText(els.receiptImage, els.receiptScanStatus, "receipt");
       const items = extractReceiptItems(text);
       if (!items.length) {
         showToast("No receipt items found. Try a clearer photo.");
